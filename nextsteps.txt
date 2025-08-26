@@ -1,0 +1,128 @@
+# Next Steps for paperd.ink TRMNL Firmware
+
+## Current Status
+✅ Basic project structure created
+✅ Hardware abstraction layer defined and implemented
+✅ TRMNL client architecture implemented
+✅ Main program with button handling created
+✅ Configuration files and build system set up
+✅ secrets.h created for WiFi credentials and configuration
+✅ Complete hardware functions implemented (display, buttons, SD card, power)
+✅ Complete TRMNL API client implemented (setup, display, image download)
+✅ WiFi configuration portal implemented
+✅ Caching system implemented
+✅ All header function declarations implemented
+
+## Immediate Next Steps
+
+### 1. Complete Hardware Implementation
+- [x] Fully implement paperdink_hardware.cpp
+  - [x] Display functions (clearDisplay, updateDisplay, displayImage)
+  - [x] Button handling (updateButtons, getButtonState)
+  - [x] SD card functions (writeFile, readFile)
+  - [x] Power management (enterDeepSleep, getBatteryVoltage)
+  - [x] Buzzer functions (beep, playTone)
+
+### 2. Complete TRMNL Client
+- [x] Implement trmnl_client.cpp API functions
+  - [x] callSetupAPI() - Device registration
+  - [x] callDisplayAPI() - Content retrieval
+  - [x] downloadImage() - Image download
+  - [x] Config portal web interface
+  - [x] Caching mechanism
+
+### 3. Testing and Debugging
+- [ ] Write unit tests (test/ directory)
+- [ ] Hardware tests on real paperd.ink device
+- [ ] Test TRMNL API integration
+- [ ] Validate power management
+
+### 4. Display Optimization
+- [ ] Correct GxEPD2 display driver integration
+- [ ] Implement tri-color display support
+- [ ] Image conversion and dithering
+- [ ] Partial updates for better performance
+
+### 5. Extended Features
+- [ ] SD card caching system
+- [ ] Offline mode implementation
+- [ ] OTA update mechanism
+- [ ] Extended button functions
+
+## Technical Details
+
+### Required Libraries (already in platformio.ini)
+- ArduinoJson for API communication
+- GxEPD2 for E-Paper display
+- WiFiClientSecure for HTTPS
+- SD for SD card access
+
+### Hardware-specific Adaptations
+- Configure display driver for paperd.ink model
+- Validate pin definitions
+- Optimize power management for 1900mAh battery
+
+### TRMNL API Integration
+- MAC address based registration
+- Image download and caching
+- Refresh rate management
+- Error handling and retry logic
+
+## Deployment Preparation
+
+### 1. Test Build System
+```bash
+pio run -e paperdink_trmnl
+```
+
+### 2. Document Flash Process
+- Boot button procedure
+- Serial monitor for debugging
+- OTA update path
+
+### 3. User Documentation
+- Extend setup instructions
+- Troubleshooting guide
+- Button reference
+
+## Priorities
+
+### High (immediate)
+1. Implement hardware functions
+2. Basic TRMNL API calls
+3. Test display output
+
+### Medium (this week)
+1. WiFi config portal
+2. SD card integration
+3. Power management
+
+### Low (later)
+1. Extended features
+2. OTA updates
+3. Custom plugins
+
+## Known Challenges
+
+### Display Integration
+- Choose correct GxEPD2 variant for paperd.ink
+- Tri-color vs. monochrome support
+- Performance optimization
+
+### Power Management
+- Deep sleep with button wakeup
+- Battery monitoring calibration
+- Peripheral power control
+
+### TRMNL Compatibility
+- Image format conversion
+- API response handling
+- Error recovery
+
+## Next Session Agenda
+1. Complete hardware implementation
+2. Create first functional prototype
+3. Test on real paperd.ink device
+4. Validate TRMNL account integration
+
+Last updated: 2025-01-27
