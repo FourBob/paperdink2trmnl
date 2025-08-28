@@ -4,16 +4,91 @@
 #include <esp_bt.h>
 #include <WiFi.h>
 #include <esp_system.h>
+#include <esp_mac.h>
 
 // Display driver includes - using generic GxEPD2 for compatibility
 #include <GxEPD2_BW.h>
 #include <GxEPD2_3C.h>
+#include <PNGdec.h>
 
-// Note: This is a placeholder display instance
-// In a real implementation, you would select the correct display driver
-// based on your specific paperd.ink model (e.g., GxEPD2_420, GxEPD2_290, etc.)
-// For now, we'll use a null pointer and implement display functions as stubs
-GxEPD2_GFX* displayInstance = nullptr;
+// Configure a concrete 4.2" B/W EPD (400x300) using GxEPD2
+// Pins are defined in config.h
+static GxEPD2_BW<GxEPD2_420, GxEPD2_420::HEIGHT> epd(GxEPD2_420(EPD_CS_PIN, EPD_DC_PIN, EPD_RESET_PIN, EPD_BUSY_PIN));
+
+// Global PNG decoder instance for callback access
+static PNG s_png;
+
+struct PngDrawContext {
+    int x0;
+    int y0;
+    int tW;
+    int tH;
+    float sX;
+    float sY;
+    bool invert;
+};
+
+// PNGdec draw callback: render each decoded line directly to the EPD with scaling (nearest neighbor)
+static int pngDrawToEPD(PNGDRAW *pDraw) {
+    PngDrawContext *ctx = (PngDrawContext *)pDraw->pUser;
+
+    // Buffers for one decoded source line and one 1-bit destination line across display width
+    static uint16_t line565[1024];
+    static uint8_t lineBits[(DISPLAY_WIDTH + 7) / 8];
+
+    if (pDraw->iWidth > 1024) {
+        // Too wide for our temporary buffer; abort decode to avoid overflow
+        return 0; // stops decode
+    }
+
+    // Convert current source line to RGB565
+    s_png.getLineAsRGB565(pDraw, line565, PNG_RGB565_LITTLE_ENDIAN, 0xFFFFFFFF);
+
+    // Clear destination line to white
+    memset(lineBits, 0xFF, sizeof(lineBits));
+
+    const int srcW = pDraw->iWidth;
+    const int dstW = ctx->tW;
+    const float sX = ctx->sX;
+
+    // Build scaled destination lineBits for this source line
+    for (int dx = 0; dx < dstW; ++dx) {
+        int sx = (int)(dx / sX);
+        if (sx < 0) sx = 0;
+        if (sx >= srcW) sx = srcW - 1;
+        uint16_t c = line565[sx];
+        // Convert RGB565 to luma and threshold to 1-bit (with optional invert)
+        uint8_t r5 = (c >> 11) & 0x1F;
+        uint8_t g6 = (c >> 5) & 0x3F;
+        uint8_t b5 = (c) & 0x1F;
+        uint8_t r = (r5 * 255 + 15) / 31;
+        uint8_t g = (g6 * 255 + 31) / 63;
+        uint8_t b = (b5 * 255 + 15) / 31;
+        uint8_t lum = (uint8_t)((r * 30 + g * 59 + b * 11) / 100);
+        bool black = ctx->invert ? (lum >= 128) : (lum < 128);
+        int dstX = ctx->x0 + dx;
+        if (dstX >= 0 && dstX < DISPLAY_WIDTH && black) {
+            lineBits[dstX >> 3] &= (uint8_t)~(0x80 >> (dstX & 7));
+        }
+    }
+
+    // Vertical scaling: replicate or skip lines based on sY
+    int yStart = ctx->y0 + (int)floorf(pDraw->y * ctx->sY);
+    int yEnd   = ctx->y0 + (int)floorf((pDraw->y + 1) * ctx->sY) - 1;
+    if (yEnd < yStart) yEnd = yStart;
+
+    for (int dy = yStart; dy <= yEnd; ++dy) {
+        if (dy < 0 || dy >= DISPLAY_HEIGHT) continue;
+        epd.drawBitmap(0, dy, lineBits, DISPLAY_WIDTH, 1, GxEPD_BLACK);
+    }
+
+    return 1; // continue
+}
+
+// Simple command buffer to accumulate text draws until updateDisplay()
+struct TextCmd { String text; int x; int y; int size; };
+static TextCmd g_text_cmds[16];
+static int g_text_cmd_count = 0;
 
 PaperdInkHardware::PaperdInkHardware()
     : display(nullptr)
@@ -51,6 +126,9 @@ bool PaperdInkHardware::begin() {
         return false;
     }
 
+    // Load persisted invert setting
+    invertDisplayFlag = loadBool("invert", false);
+
     // Initialize display
     if (!initializeDisplay()) {
         #if DEBUG_ENABLED
@@ -58,6 +136,7 @@ bool PaperdInkHardware::begin() {
         #endif
         return false;
     }
+
 
     // Initialize SD card
     initializeSDCard();
@@ -98,6 +177,7 @@ void PaperdInkHardware::initializePins() {
     digitalWrite(SD_ENABLE_PIN, LOW);    // Active low
     digitalWrite(BATTERY_ENABLE_PIN, HIGH);
 
+
     // Initialize button pins
     pinMode(BUTTON_1_PIN, INPUT_PULLUP);
     pinMode(BUTTON_2_PIN, INPUT_PULLUP);
@@ -125,18 +205,18 @@ bool PaperdInkHardware::initializeDisplay() {
     delay(100);
 
     // Initialize display based on type
-    display = displayInstance;  // Will be nullptr for now
     displayType = DISPLAY_BW;   // Default to monochrome
 
-    // Note: In a real implementation, you would initialize the specific
-    // display driver for your paperd.ink model here
-    // For example:
-    // display = new GxEPD2_BW<GxEPD2_420, GxEPD2_420::HEIGHT>(
-    //     GxEPD2_420(EPD_CS_PIN, EPD_DC_PIN, EPD_RESET_PIN, EPD_BUSY_PIN));
-    // display->init(115200);
+    // Bring up the panel
+    epd.init(0); // use default SPI frequency
+    epd.setRotation(DISPLAY_ROTATION);
+    epd.setTextColor(GxEPD_BLACK);
+    epd.setFullWindow();
+    epd.firstPage();
+    do { epd.fillScreen(GxEPD_WHITE); } while (epd.nextPage());
 
     #if DEBUG_ENABLED
-    Serial.println("Display initialization completed (stub implementation)");
+    Serial.println("Display initialization completed (GxEPD2 4.2\" B/W)");
     #endif
 
     return true;
@@ -146,6 +226,7 @@ void PaperdInkHardware::initializeSDCard() {
     // Enable SD card power
     digitalWrite(SD_ENABLE_PIN, LOW);  // Active low
     delay(100);
+
 
     // Initialize SD card
     if (SD.begin(SD_CS_PIN)) {
@@ -160,6 +241,16 @@ void PaperdInkHardware::initializeSDCard() {
         Serial.println("SD card initialization failed");
         #endif
     }
+}
+
+// Display options setters/getters (out-of-line)
+void PaperdInkHardware::setInvertDisplay(bool invert) {
+    invertDisplayFlag = invert;
+    saveBool("invert", invert);
+}
+
+bool PaperdInkHardware::getInvertDisplay() const {
+    return invertDisplayFlag;
 }
 
 void PaperdInkHardware::initializeButtons() {
@@ -234,54 +325,124 @@ bool PaperdInkHardware::checkChargingStatus() {
 
 // Display methods (stub implementations)
 void PaperdInkHardware::clearDisplay() {
-    #if DEBUG_ENABLED
-    Serial.println("Clear display (stub)");
-    #endif
+    epd.firstPage();
+    do { epd.fillScreen(GxEPD_WHITE); } while (epd.nextPage());
 }
 
 void PaperdInkHardware::updateDisplay() {
-    #if DEBUG_ENABLED
-    Serial.println("Update display (stub)");
-    #endif
+    epd.firstPage();
+    do {
+        epd.fillScreen(GxEPD_WHITE);
+        for (int i = 0; i < g_text_cmd_count; ++i) {
+            epd.setCursor(g_text_cmds[i].x, g_text_cmds[i].y);
+            epd.setTextSize(g_text_cmds[i].size);
+            epd.print(g_text_cmds[i].text);
+        }
+    } while (epd.nextPage());
+    g_text_cmd_count = 0; // clear buffer
 }
 
 void PaperdInkHardware::partialUpdateDisplay() {
-    #if DEBUG_ENABLED
-    Serial.println("Partial update display (stub)");
-    #endif
+    // For simplicity, re-use full update
+    updateDisplay();
 }
 
 void PaperdInkHardware::displayText(const char* text, int x, int y, int size) {
-    if (!display) {
-        #if DEBUG_ENABLED
-        Serial.printf("Display text (stub): '%s' at (%d,%d) size %d\n", text, x, y, size);
-        #endif
-        return;
+    if (g_text_cmd_count < (int)(sizeof(g_text_cmds)/sizeof(g_text_cmds[0]))) {
+        g_text_cmds[g_text_cmd_count++] = TextCmd{String(text), x, y, size};
     }
-
-    // Note: In a real implementation, you would set fonts and display text
-    // For now, this is a stub implementation
-    #if DEBUG_ENABLED
-    Serial.printf("Display text: '%s' at (%d,%d) size %d\n", text, x, y, size);
-    #endif
 }
 
 void PaperdInkHardware::displayImage(const uint8_t* imageData, size_t imageSize) {
-    if (!display || !imageData) return;
-
-    // This is a simplified implementation
-    // In a real implementation, you would decode the image format
-    // and convert it to the display's native format
+    if (!imageData || imageSize == 0) return;
 
     #if DEBUG_ENABLED
     Serial.printf("Displaying image of size: %d bytes\n", imageSize);
     #endif
 
-    // For now, just clear and show a placeholder
-    clearDisplay();
-    displayText("Image Display", 10, 50, 2);
-    displayText("Not Implemented", 10, 80, 1);
-    updateDisplay();
+    // Try to detect a simple 1-bit raw buffer (exact display size)
+    const size_t raw1bppSize = (DISPLAY_WIDTH * DISPLAY_HEIGHT) / 8;
+    if (imageSize == raw1bppSize) {
+        // Draw raw 1-bit bitmap
+        epd.setFullWindow();
+        epd.firstPage();
+        do {
+            epd.fillScreen(GxEPD_WHITE);
+            // GxEPD2 expects 1-bit bitmap MSB first; assume incoming buffer is MSB-first
+            epd.drawBitmap(0, 0, imageData, DISPLAY_WIDTH, DISPLAY_HEIGHT, GxEPD_BLACK);
+        } while (epd.nextPage());
+        return;
+    }
+
+    // Otherwise assume PNG (1-bit or grayscale) and decode with PNGdec
+    int rc = s_png.openRAM((uint8_t*)imageData, (int)imageSize, pngDrawToEPD);
+    if (rc != PNG_SUCCESS) {
+        #if DEBUG_ENABLED
+        Serial.println("PNG openRAM failed");
+        #endif
+        // fallback: clear
+        clearDisplay();
+        displayText("PNG decode failed", 10, 60, 1);
+        updateDisplay();
+        return;
+    }
+
+    // Read PNG size
+    int16_t pngW = s_png.getWidth();
+    int16_t pngH = s_png.getHeight();
+    #if DEBUG_ENABLED
+    Serial.printf("PNG size: %dx%d\n", pngW, pngH);
+    #endif
+
+    // Compute uniform scale to fit into DISPLAY (letterbox/pillarbox), keep aspect ratio
+    float s = 1.0f;
+    if (pngW > 0 && pngH > 0) {
+        float sx = (float)DISPLAY_WIDTH / (float)pngW;
+        float sy = (float)DISPLAY_HEIGHT / (float)pngH;
+        s = sx < sy ? sx : sy;
+        if (s <= 0.0f) s = 1.0f;
+    }
+    int tW = (int)floorf(pngW * s);
+    int tH = (int)floorf(pngH * s);
+    if (tW < 1) tW = 1;
+    if (tH < 1) tH = 1;
+
+    // Centered placement
+    PngDrawContext ctx;
+    ctx.tW = tW;
+    ctx.tH = tH;
+    ctx.sX = s;
+    ctx.sY = s;
+    ctx.x0 = (DISPLAY_WIDTH - tW) / 2;
+    ctx.y0 = (DISPLAY_HEIGHT - tH) / 2;
+    ctx.invert = invertDisplayFlag;
+
+    // Close after reading header; reopen per page (required for GxEPD2 paging)
+    s_png.close();
+
+    // Refresh invert per page in case it changed
+    ctx.invert = invertDisplayFlag;
+
+    epd.setFullWindow();
+    epd.firstPage();
+    do {
+        epd.fillScreen(GxEPD_WHITE);
+        int orc = s_png.openRAM((uint8_t*)imageData, (int)imageSize, pngDrawToEPD);
+        if (orc != PNG_SUCCESS) {
+            #if DEBUG_ENABLED
+            Serial.println("PNG openRAM failed on page");
+            #endif
+            break;
+        }
+        int dec = s_png.decode(&ctx, 0);
+        s_png.close();
+        if (dec != PNG_SUCCESS) {
+            #if DEBUG_ENABLED
+            Serial.printf("PNG decode error: %d\n", dec);
+            #endif
+            break;
+        }
+    } while (epd.nextPage());
 }
 
 // Button methods
@@ -467,6 +628,46 @@ bool PaperdInkHardware::deleteFile(const char* path) {
     return SD.remove(path);
 }
 
+bool PaperdInkHardware::formatSDCard() {
+    if (!sdCardAvailable) return false;
+
+    // Recursively delete all files and directories on the SD card
+    std::function<bool(const char*)> rmrf = [&](const char* path) -> bool {
+        File entry = SD.open(path);
+        if (!entry) return false;
+        if (!entry.isDirectory()) {
+            entry.close();
+            return SD.remove(path);
+        }
+        // Directory
+        File child;
+        bool ok = true;
+        while ((child = entry.openNextFile())) {
+            String childPath = String(path);
+            if (!child.isDirectory()) {
+                ok = ok && SD.remove((childPath + "/" + child.name()).c_str());
+            } else {
+                String subdir = childPath + "/" + child.name();
+                child.close();
+                ok = ok && rmrf(subdir.c_str());
+            }
+        }
+        entry.close();
+        // Remove the directory itself if not root
+        if (String(path) != "/") {
+            ok = ok && SD.rmdir(path);
+        }
+        return ok;
+    };
+
+    bool result = rmrf("/");
+    #if DEBUG_ENABLED
+    Serial.printf("SD format (rm -rf) result: %s\n", result ? "OK" : "FAIL");
+    #endif
+    return result;
+}
+
+
 // Buzzer methods
 void PaperdInkHardware::beep(int frequency, int duration) {
     tone(BUZZER_PIN, frequency, duration);
@@ -509,6 +710,21 @@ void PaperdInkHardware::clearPreferences() {
 
 // Utility methods
 String PaperdInkHardware::getMacAddress() {
+    // Try to get base MAC via esp_read_mac if WiFi not yet initialized
+    uint8_t mac[6] = {0};
+    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
+        char buf[18];
+        snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        return String(buf);
+    }
+    // Fallback to esp_wifi_get_mac (requires WiFi init) and then to WiFi.macAddress()
+    if (esp_wifi_get_mac(WIFI_IF_STA, mac) == ESP_OK) {
+        char buf[18];
+        snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        return String(buf);
+    }
     return WiFi.macAddress();
 }
 
@@ -556,24 +772,16 @@ void PaperdInkHardware::displayBitmap(const uint8_t* bitmap, int x, int y, int w
 }
 
 void PaperdInkHardware::setRotation(int rotation) {
-    #if DEBUG_ENABLED
-    Serial.printf("Set rotation (stub): %d\n", rotation);
-    #endif
+    epd.setRotation(rotation);
 }
 
 void PaperdInkHardware::powerOffDisplay() {
-    digitalWrite(EPD_ENABLE_PIN, HIGH);  // Disable display power
-    #if DEBUG_ENABLED
-    Serial.println("Power off display");
-    #endif
+    epd.hibernate();
 }
 
 void PaperdInkHardware::powerOnDisplay() {
-    digitalWrite(EPD_ENABLE_PIN, LOW);  // Enable display power
-    delay(100);
-    #if DEBUG_ENABLED
-    Serial.println("Power on display");
-    #endif
+    epd.init(0);
+    epd.setRotation(DISPLAY_ROTATION);
 }
 
 void PaperdInkHardware::enterLightSleep(uint32_t sleepTimeMs) {

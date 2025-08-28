@@ -93,7 +93,9 @@ private:
     bool callDisplayAPI(DisplayResponse& response);
     bool sendLogs(const String& logData);
     bool downloadImage(const String& imageUrl, uint8_t* buffer, size_t maxSize, size_t* actualSize);
+    bool downloadImageAutoAlloc(const String& imageUrl, uint8_t** outBuffer, size_t* outSize);
     bool downloadFirmware(const String& firmwareUrl);
+    long getRemoteContentLength(const String& url);
 
     // Utility methods
     String createRequestHeaders(bool includeAuth = false);

@@ -12,6 +12,11 @@
 #define TRMNL_API_BASE_URL "https://usetrmnl.com"
 #endif
 
+// Use custom API key if defined in secrets.h
+#ifdef CUSTOM_API_KEY
+#define TRMNL_API_KEY CUSTOM_API_KEY
+#endif
+
 #define TRMNL_API_SETUP_ENDPOINT "/api/setup"
 #define TRMNL_API_DISPLAY_ENDPOINT "/api/display"
 #define TRMNL_API_LOGS_ENDPOINT "/api/logs"
@@ -73,7 +78,7 @@
 
 // TRMNL Client Configuration
 #define HTTP_TIMEOUT_MS 30000
-#define MAX_IMAGE_SIZE 50000  // 50KB max image size
+#define MAX_IMAGE_SIZE 122880  // 120KB max image size
 #define CACHE_ENABLED true
 #define MAX_CACHED_IMAGES 10
 
@@ -83,7 +88,7 @@
 #define BUTTON_VERY_LONG_PRESS_MS 5000
 
 // Debug Configuration
-#ifdef CORE_DEBUG_LEVEL
+#ifdef DEVELOPMENT_MODE
 #define DEBUG_ENABLED true
 #define DEBUG_SERIAL_SPEED 115200
 #else

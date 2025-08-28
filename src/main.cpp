@@ -17,6 +17,7 @@
 #include "config.h"
 #include "paperdink_hardware.h"
 #include "trmnl_client.h"
+#include "secrets.h"
 
 // Global objects
 PaperdInkHardware hardware;
@@ -43,14 +44,46 @@ void handleFactoryReset();
 
 void setup() {
     // Initialize serial communication for debugging
-    #if DEBUG_ENABLED
-    Serial.begin(DEBUG_SERIAL_SPEED);
-    while (!Serial && millis() < 3000) {
-        delay(10);
-    }
-    Serial.println("=== paperd.ink TRMNL Firmware Starting ===");
-    Serial.println("Version: " FIRMWARE_VERSION);
+    Serial.begin(115200);
+    delay(3000);  // Longer delay for stable boot
+
+    // Ensure we're fully booted
+    Serial.println();
+    Serial.println("*** BOOT START ***");
+    Serial.flush();
+    delay(100);
+
+    Serial.println();
+    Serial.println("========================================");
+    Serial.println("=== paperd.ink TRMNL Firmware v1.0 ===");
+    Serial.println("========================================");
+    Serial.println();
+
+    Serial.print("ESP32 Chip ID: ");
+    Serial.println(ESP.getChipModel());
+    Serial.print("MAC Address: ");
+    Serial.println(hardware.getMacAddress());
+    Serial.print("Free Heap: ");
+    Serial.println(ESP.getFreeHeap());
+    Serial.println();
+
+    Serial.println("Configuration:");
+    Serial.println("- DEBUG_ENABLED: " + String(DEBUG_ENABLED));
+    Serial.println("- DEVELOPMENT_MODE: " + String(DEVELOPMENT_MODE));
+    Serial.println("- WiFi SSID: " + String(WIFI_SSID));
+    #ifdef CUSTOM_FRIENDLY_ID
+    Serial.println("- Device ID: " + String(CUSTOM_FRIENDLY_ID));
+    #else
+    Serial.println("- Device ID: (not set)");
     #endif
+    #ifdef CUSTOM_API_KEY
+    Serial.println("- API Key: " + String(CUSTOM_API_KEY).substring(0, 8) + "...");
+    #else
+    Serial.println("- API Key: (not set)");
+    #endif
+    Serial.println();
+
+    Serial.println("Starting hardware initialization...");
 
     // Check wakeup reason
     bool userWakeup = checkWakeupReason();
@@ -88,6 +121,8 @@ void setup() {
     performStartupSequence();
 
     systemInitialized = true;
+    // Trigger an immediate first content refresh after startup
+    forceRefresh = true;
     lastUpdateTime = millis();
 
     #if DEBUG_ENABLED
@@ -98,7 +133,32 @@ void setup() {
 }
 
 void loop() {
+    #if DEBUG_ENABLED
+    static unsigned long lastDebug = 0;
+    if (millis() - lastDebug > 2000) {  // Every 2 seconds
+        Serial.printf("*** LOOP: systemInitialized=%s, State=%d ***\n",
+                     systemInitialized ? "true" : "false",
+                     trmnlClient.getState());
+        lastDebug = millis();
+    }
+    #endif
+
+
+    // Debug serial command to trigger Factory Reset: send "FR" or "FACTORY_RESET" over serial
+    if (Serial.available()) {
+        String cmd = Serial.readStringUntil('\n');
+        cmd.trim();
+        if (cmd.equalsIgnoreCase("FR") || cmd.equalsIgnoreCase("FACTORY_RESET")) {
+            Serial.println("Serial command received: FACTORY RESET");
+            handleFactoryReset();
+            return; // handleFactoryReset will restart the device
+        }
+    }
+
     if (!systemInitialized) {
+        #if DEBUG_ENABLED
+        Serial.println("Loop: systemInitialized is false, returning");
+        #endif
         delay(1000);
         return;
     }
@@ -118,7 +178,7 @@ void loop() {
     // Check if it's time for a content update
     unsigned long currentTime = millis();
     if (forceRefresh ||
-        (currentTime - lastUpdateTime > (trmnlClient.getRefreshRate() * 1000))) {
+        (currentTime - lastUpdateTime >= (unsigned long)trmnlClient.getRefreshRate() * 1000UL)) {
 
         if (trmnlClient.updateContent()) {
             lastUpdateTime = currentTime;
@@ -168,13 +228,15 @@ void handleButtons() {
         lastButtonTime = currentTime;
     }
 
-    // Button 2: Cycle through playlists/screens (future feature)
+    // Button 2: Toggle invert display
     if (hardware.getButtonState(1) == BUTTON_PRESSED) {
+        bool inv = !hardware.getInvertDisplay();
+        hardware.setInvertDisplay(inv);
         #if DEBUG_ENABLED
-        Serial.println("Button 2 pressed: Cycle screens");
+        Serial.printf("Button 2 pressed: Invert %s\n", inv ? "ON" : "OFF");
         #endif
-        // TODO: Implement playlist cycling
-        hardware.beep(800, 100);
+        hardware.beep(inv ? 1000 : 600, 80);
+        forceRefresh = true; // redraw current content with new invert mode
         hardware.resetButtonState(1);
         lastButtonTime = currentTime;
     }
@@ -208,8 +270,19 @@ void handleButtons() {
 void handleSystemStates() {
     DeviceState currentState = trmnlClient.getState();
 
+    #if DEBUG_ENABLED
+    static unsigned long lastStateDebug = 0;
+    if (millis() - lastStateDebug > 5000) {  // Every 5 seconds
+        Serial.printf("*** handleSystemStates: State=%d ***\n", currentState);
+        lastStateDebug = millis();
+    }
+    #endif
+
     switch (currentState) {
         case STATE_WIFI_SETUP:
+            #if DEBUG_ENABLED
+            Serial.println("Handling STATE_WIFI_SETUP");
+            #endif
             // Handle WiFi configuration portal
             if (!trmnlClient.hasWiFiCredentials()) {
                 if (!trmnlClient.startConfigPortal()) {
@@ -221,11 +294,53 @@ void handleSystemStates() {
             break;
 
         case STATE_DEVICE_SETUP:
+            #if DEBUG_ENABLED
+            Serial.println("Handling STATE_DEVICE_SETUP - calling registerDevice()");
+            #endif
             // Handle device registration
             if (!trmnlClient.registerDevice()) {
+                #if DEBUG_ENABLED
+                Serial.println("registerDevice() failed!");
+                #endif
                 showErrorScreen("Device Registration Failed");
                 delay(5000);
                 enterSleepMode();
+            } else {
+                #if DEBUG_ENABLED
+                Serial.println("registerDevice() succeeded!");
+                #endif
+            }
+            break;
+
+        case STATE_OPERATIONAL:
+            #if DEBUG_ENABLED
+            Serial.println("Handling STATE_OPERATIONAL - checking WiFi and updating display");
+            #endif
+            // Handle operational state - check WiFi and update display
+            if (!trmnlClient.isWiFiConnected()) {
+                #if DEBUG_ENABLED
+                Serial.println("WiFi disconnected in operational state - attempting reconnect");
+                #endif
+                // Try to register device again (which includes WiFi connection)
+                if (!trmnlClient.registerDevice()) {
+                    #if DEBUG_ENABLED
+                    Serial.println("Device registration/WiFi reconnect failed - will retry later, staying operational");
+                    #endif
+                    // Stay in operational; we'll retry on the next loop
+                }
+            } else {
+                // WiFi is connected, check for updates periodically
+                static unsigned long lastUpdateCheck = 0;
+                if (millis() - lastUpdateCheck > 60000) {  // Check every minute
+                    #if DEBUG_ENABLED
+                    Serial.println("Checking for content updates...");
+                    #endif
+                    if (trmnlClient.hasNewContent()) {
+                        trmnlClient.updateContent();
+                        trmnlClient.displayContent();
+                    }
+                    lastUpdateCheck = millis();
+                }
             }
             break;
 
@@ -328,45 +443,74 @@ void showStatusScreen() {
     // WiFi status
     String wifiStatus = "WiFi: ";
     if (trmnlClient.isWiFiConnected()) {
-        wifiStatus += trmnlClient.getWiFiSSID() + " (" + String(trmnlClient.getWiFiRSSI()) + "dBm)";
+        wifiStatus += trmnlClient.getWiFiSSID();
     } else {
         wifiStatus += "Disconnected";
     }
     hardware.displayText(wifiStatus.c_str(), 10, 50, 1);
 
-    // Device status
-    String deviceStatus = "Device: " + trmnlClient.getFriendlyId();
-    hardware.displayText(deviceStatus.c_str(), 10, 70, 1);
+    // Network details
+    if (trmnlClient.isWiFiConnected()) {
+        String ipLine = String("IP: ") + WiFi.localIP().toString();
+        hardware.displayText(ipLine.c_str(), 10, 65, 1);
+        String gwLine = String("GW: ") + WiFi.gatewayIP().toString();
+        hardware.displayText(gwLine.c_str(), 10, 80, 1);
+        String dnsLine = String("DNS: ") + WiFi.dnsIP().toString();
+        hardware.displayText(dnsLine.c_str(), 10, 95, 1);
+        String rssiLine = String("Signal: ") + String(trmnlClient.getWiFiRSSI()) + " dBm";
+        hardware.displayText(rssiLine.c_str(), 10, 110, 1);
+    }
+
+    // Device identifiers
+    String macLine = String("MAC: ") + hardware.getMacAddress();
+    hardware.displayText(macLine.c_str(), 10, 125, 1);
+    String deviceStatus = String("Device: ") + trmnlClient.getFriendlyId();
+    hardware.displayText(deviceStatus.c_str(), 10, 140, 1);
 
     // Battery status
-    String batteryStatus = "Battery: " + String(hardware.getBatteryPercentage()) + "%";
+    String batteryStatus = String("Battery: ") + String(hardware.getBatteryPercentage()) + "%";
     if (hardware.isCharging()) {
         batteryStatus += " (Charging)";
     }
-    hardware.displayText(batteryStatus.c_str(), 10, 90, 1);
+    hardware.displayText(batteryStatus.c_str(), 10, 155, 1);
 
     // SD Card status
     String sdStatus = "SD Card: ";
     sdStatus += hardware.isSDCardAvailable() ? "Available" : "Not Available";
-    hardware.displayText(sdStatus.c_str(), 10, 110, 1);
+    hardware.displayText(sdStatus.c_str(), 10, 170, 1);
 
     // Last update
-    String updateStatus = "Last Update: " + String((millis() - lastUpdateTime) / 1000) + "s ago";
-    hardware.displayText(updateStatus.c_str(), 10, 130, 1);
+    String updateStatus = String("Last Update: ") + String((millis() - lastUpdateTime) / 1000) + "s ago";
+    hardware.displayText(updateStatus.c_str(), 10, 185, 1);
 
-    // Refresh rate
-    String refreshStatus = "Refresh: " + String(trmnlClient.getRefreshRate()) + "s";
-    hardware.displayText(refreshStatus.c_str(), 10, 150, 1);
+    // Refresh rate and free RAM
+    String refreshStatus = String("Refresh: ") + String(trmnlClient.getRefreshRate()) + "s";
+    hardware.displayText(refreshStatus.c_str(), 10, 200, 1);
+    String ramLine = String("Free RAM: ") + String(hardware.getFreeHeap()/1024) + " KB";
+    hardware.displayText(ramLine.c_str(), 10, 215, 1);
 
-    hardware.displayText("Press Button 3 again to exit", 10, 200, 1);
+    hardware.displayText("Press B3 to exit | Hold B1: format SD", 10, 235, 1);
     hardware.updateDisplay();
 
-    // Wait for button press to exit
-    while (!hardware.isButtonPressed(2)) {
+    // Wait loop: B3 exits, long-press B1 formats SD (with beep)
+    while (true) {
         hardware.updateButtons();
+        if (hardware.getButtonState(2) == BUTTON_PRESSED) { // B3 short press
+            hardware.resetButtonState(2);
+            break;
+        }
+        if (hardware.getButtonState(0) == BUTTON_LONG_PRESS) { // B1 long press
+            hardware.beep(800, 120);
+            hardware.displayText("Formatting SD...", 10, 255, 1);
+            hardware.updateDisplay();
+            bool ok = hardware.formatSDCard();
+            hardware.displayText(ok ? "SD format: OK" : "SD format: FAIL", 10, 270, 1);
+            hardware.updateDisplay();
+            // consume press
+            hardware.resetButtonState(0);
+        }
         delay(100);
     }
-    hardware.resetButtonState(2);
 }
 
 void enterSleepMode() {

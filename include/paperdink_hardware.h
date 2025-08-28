@@ -54,6 +54,9 @@ private:
     // SD Card
     bool sdCardAvailable;
 
+    // Display options
+    bool invertDisplayFlag = false;
+
     // Preferences for persistent storage
     Preferences preferences;
 
@@ -86,6 +89,10 @@ public:
     void powerOffDisplay();
     void powerOnDisplay();
 
+    // Display options
+    void setInvertDisplay(bool invert);
+    bool getInvertDisplay() const;
+
     // Button methods
     void updateButtons();
     ButtonState getButtonState(int buttonNum);
@@ -112,6 +119,7 @@ public:
     bool deleteFile(const char* path);
     bool fileExists(const char* path);
     size_t getFileSize(const char* path);
+    bool formatSDCard();  // Danger: deletes all files/directories on SD
 
     // Buzzer
     void beep(int frequency = 1000, int duration = 100);
