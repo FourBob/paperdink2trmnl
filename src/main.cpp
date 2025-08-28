@@ -28,6 +28,7 @@ unsigned long lastUpdateTime = 0;
 unsigned long lastButtonCheck = 0;
 bool systemInitialized = false;
 bool forceRefresh = false;
+static bool suppressStartupUI = false; // Skip boot/ready screens on deep-sleep wake
 
 // Function prototypes
 void setup();
@@ -87,6 +88,8 @@ void setup() {
 
     // Check wakeup reason
     bool userWakeup = checkWakeupReason();
+    // If we woke from deep sleep (timer or button), suppress boot/ready UI
+    suppressStartupUI = !userWakeup;
 
     // Initialize hardware
     if (!hardware.begin()) {
@@ -99,8 +102,10 @@ void setup() {
         return;
     }
 
-    // Show startup screen
-    showStartupScreen();
+    // Show startup screen only on cold boot (not deep-sleep wake)
+    if (!suppressStartupUI) {
+        showStartupScreen();
+    }
 
     // Check for factory reset (Button 4 held during startup)
     if (hardware.isButtonVeryLongPressed(3)) {  // Button 4 (index 3)
@@ -119,6 +124,7 @@ void setup() {
 
     // Perform startup sequence
     performStartupSequence();
+    if (suppressStartupUI) return; // keep current content on screen
 
     systemInitialized = true;
     // Trigger an immediate first content refresh after startup
@@ -400,13 +406,16 @@ void performStartupSequence() {
 
     // All good, set operational state
     trmnlClient.setState(STATE_OPERATIONAL);
-    hardware.displayText("Ready", 10, 100, 3);
-    hardware.displayText("paperd.ink TRMNL", 10, 140, 2);
-    hardware.updateDisplay();
-    delay(2000);
+    if (!suppressStartupUI) {
+        hardware.displayText("Ready", 10, 100, 3);
+        hardware.displayText("paperd.ink TRMNL", 10, 140, 2);
+        hardware.updateDisplay();
+        delay(2000);
+    }
 }
 
 void showStartupScreen() {
+    if (suppressStartupUI) return; // do not alter the screen on deep-sleep wake
     hardware.clearDisplay();
     hardware.displayText("paperd.ink", 50, 80, 3);
     hardware.displayText("TRMNL Edition", 50, 120, 2);
