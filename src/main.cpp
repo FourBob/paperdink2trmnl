@@ -187,6 +187,10 @@ void loop() {
             #if DEBUG_ENABLED
             Serial.println("Content updated successfully");
             #endif
+
+            // Nach erfolgreichem Update sofort schlafen, Wake per Timer/Button
+            enterSleepMode();
+            return;
         } else {
             #if DEBUG_ENABLED
             Serial.println("Content update failed: " + trmnlClient.getLastError());
@@ -518,19 +522,17 @@ void enterSleepMode() {
     Serial.println("Entering sleep mode...");
     #endif
 
-    // Show sleep screen
-    hardware.clearDisplay();
-    hardware.displayText("Sleeping...", 50, 100, 2);
-    hardware.displayText("Press any button", 10, 140, 1);
-    hardware.displayText("to wake up", 10, 160, 1);
-    hardware.updateDisplay();
+    // Do NOT change the E-Paper content before sleeping.
+    // The current image should remain visible during deep sleep.
+    #if DEBUG_ENABLED
+    Serial.println("Skipping sleep screen to retain current content on e-paper");
+    #endif
 
     // Disable peripherals to save power
     hardware.disablePeripherals();
 
-    // Calculate sleep duration
+    // Calculate sleep duration: exactly the server-provided refresh_rate (seconds)
     uint32_t sleepDuration = trmnlClient.getRefreshRate();
-    if (sleepDuration < 300) sleepDuration = 300;  // Minimum 5 minutes
 
     // Enter deep sleep
     hardware.enterDeepSleep(sleepDuration);

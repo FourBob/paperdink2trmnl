@@ -517,12 +517,9 @@ void PaperdInkHardware::enterDeepSleep(uint32_t sleepTimeSeconds) {
     // Configure wakeup sources
     esp_sleep_enable_timer_wakeup(sleepTimeSeconds * 1000000ULL);  // Convert to microseconds
 
-    // Configure button wakeup (any button)
-    esp_sleep_enable_ext1_wakeup(
-        (1ULL << BUTTON_1_PIN) | (1ULL << BUTTON_2_PIN) |
-        (1ULL << BUTTON_3_PIN) | (1ULL << BUTTON_4_PIN),
-        ESP_EXT1_WAKEUP_ANY_HIGH
-    );
+    // Configure button wakeup on Button 1 (active-low) using EXT0 for reliable single-pin wake
+    // Note: Button pins use INPUT_PULLUP, so a press pulls low (level 0)
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_1_PIN, 0);
 
     // Power down peripherals
     disablePeripherals();
